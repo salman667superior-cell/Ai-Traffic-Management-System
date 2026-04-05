@@ -1,0 +1,717 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Professional Urban AI Traffic Sim</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #050505;
+            color: #00ff96;
+            font-family: 'Courier New', Courier, monospace;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+        canvas {
+            border: 1px solid #333;
+            box-shadow: 0 0 20px rgba(0, 255, 150, 0.2);
+        }
+    </style>
+</head>
+<body>
+
+<canvas id="simCanvas"></canvas>
+
+<script>
+/**
+ * ==========================================
+ * 1. SYSTEM CONFIGURATION & CONSTANTS
+ * ==========================================
+ */
+const WIDTH = 1600;
+const HEIGHT = 900;
+const SIM_W = 1100;
+const SIM_H = 900;
+const UI_W = WIDTH - SIM_W;
+
+const C_BG = "rgb(15, 15, 20)";
+const C_ROAD = "rgb(50, 54, 57)";
+const C_GRASS = "rgb(39, 110, 54)";
+const C_SIDEWALK = "rgb(140, 145, 150)";
+const C_MARKING = "rgb(220, 230, 235)";
+const C_YELLOW_LINE = "rgb(241, 196, 15)";
+const C_BUILDING_BASE = "rgb(60, 65, 70)";
+const C_UI_BG = "rgb(10, 12, 15)";
+const C_ACCENT = "#00ff96";
+const C_HACKER_GREEN = "#00c832";
+
+const CX = SIM_W / 2;
+const CY = SIM_H / 2;
+const LANE_W = 35;
+const ROAD_W = LANE_W * 4;
+
+const canvas = document.getElementById('simCanvas');
+const ctx = canvas.getContext('2d');
+canvas.width = WIDTH;
+canvas.height = HEIGHT;
+
+/**
+ * ==========================================
+ * 2. CYBER INTRO SCREEN
+ * ==========================================
+ */
+class IntroScreen {
+    constructor() {
+        this.startTime = Date.now();
+        this.targetText = "SHOCK THE SYSTEM";
+        this.currentText = "";
+        this.charIndex = 0;
+        this.matrixDrops = Array.from({ length: 100 }, () => [
+            Math.random() * WIDTH,
+            Math.random() * -1000,
+            2 + Math.random() * 4
+        ]);
+    }
+
+    updateAndDraw(dt) {
+        const elapsed = (Date.now() - this.startTime) / 1000;
+        ctx.fillStyle = "#050505";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+        // Matrix Rain
+        ctx.font = "18px Courier New";
+        this.matrixDrops.forEach(drop => {
+            const char = String.fromCharCode(33 + Math.floor(Math.random() * 93));
+            ctx.fillStyle = `rgb(0, ${100 + Math.floor(Math.random() * 155)}, 0)`;
+            ctx.fillText(char, drop[0], drop[1]);
+            drop[1] += drop[2] * (dt * 60);
+            if (drop[1] > HEIGHT) {
+                drop[1] = -50;
+                drop[0] = Math.random() * WIDTH;
+            }
+        });
+
+        // Typewriter logic
+        if (this.charIndex < this.targetText.length) {
+            if (Math.floor(elapsed * 15) > this.charIndex) {
+                this.charIndex++;
+                this.currentText = this.targetText.slice(0, this.charIndex);
+            }
+        }
+
+        // Glitch effect
+        let gx = Math.random() < 0.1 ? (Math.random() * 6 - 3) : 0;
+        let gy = Math.random() < 0.1 ? (Math.random() * 6 - 3) : 0;
+
+        ctx.font = "bold 80px Courier New";
+        ctx.fillStyle = C_ACCENT;
+        ctx.textAlign = "center";
+        ctx.fillText(this.currentText, WIDTH / 2 + gx, HEIGHT / 2 + gy);
+
+        // Cursor
+        if (Math.floor(Date.now() / 500) % 2 === 0 && this.charIndex >= this.targetText.length) {
+            const metrics = ctx.measureText(this.currentText);
+            ctx.fillText("_", WIDTH / 2 + metrics.width / 2 + 10, HEIGHT / 2);
+        }
+
+        ctx.font = "18px Courier New";
+        ctx.fillStyle = C_HACKER_GREEN;
+        if (elapsed > 1.0) ctx.fillText("SYSTEM BOOT SEQUENCE INITIATED...", WIDTH / 2, HEIGHT / 2 + 60);
+        if (elapsed > 2.0) ctx.fillText("BYPASSING SECURITY PROTOCOLS... OK", WIDTH / 2, HEIGHT / 2 + 90);
+
+        return elapsed > 3.5;
+    }
+}
+
+/**
+ * ==========================================
+ * 3. VEHICLE & KINEMATICS SYSTEM
+ * ==========================================
+ */
+class Vehicle {
+    static TYPES = {
+        "car": { len: 40, wid: 20, spd: 5.0, accel: 0.1, brake: 0.3, clr: "rgb(64, 156, 255)" },
+        "bus": { len: 80, wid: 26, spd: 3.0, accel: 0.05, brake: 0.15, clr: "rgb(255, 165, 0)" },
+        "truck": { len: 70, wid: 24, spd: 2.5, accel: 0.04, brake: 0.15, clr: "rgb(180, 180, 180)" },
+        "bike": { len: 20, wid: 10, spd: 6.5, accel: 0.15, brake: 0.4, clr: "rgb(255, 200, 50)" },
+        "ambulance": { len: 45, wid: 22, spd: 7.5, accel: 0.12, brake: 0.35, clr: "rgb(245, 245, 245)" }
+    };
+
+    constructor(axis, direction, laneIdx, vType) {
+        this.axis = axis; // "NS" or "EW"
+        this.dir = direction; // 1 or -1
+        this.laneIdx = laneIdx;
+        this.type = vType;
+
+        const stats = Vehicle.TYPES[vType];
+        this.length = stats.len;
+        this.width = stats.wid;
+        this.maxSpeed = stats.spd;
+        this.accel = stats.accel;
+        this.brake = stats.brake;
+        this.color = stats.clr;
+
+        if (this.axis === "NS") {
+            this.w = this.width;
+            this.h = this.length;
+        } else {
+            this.w = this.length;
+            this.h = this.width;
+        }
+
+        this.speed = this.maxSpeed;
+        this.isEmergency = (vType === "ambulance");
+        this.waitTime = 0;
+        this.passedIntersection = false;
+
+        this.initializePosition();
+    }
+
+    initializePosition() {
+        const offset = (this.laneIdx * LANE_W) + (LANE_W / 2);
+        if (this.axis === "NS") {
+            this.x = (this.dir === 1) ? (CX - ROAD_W / 2 + offset) : (CX + ROAD_W / 2 - offset);
+            this.x -= this.w / 2;
+            this.y = (this.dir === 1) ? (-this.h - 50) : (SIM_H + 50);
+        } else {
+            this.y = (this.dir === -1) ? (CY - ROAD_W / 2 + offset) : (CY + ROAD_W / 2 - offset);
+            this.y -= this.h / 2;
+            this.x = (this.dir === -1) ? (SIM_W + 50) : (-this.w - 50);
+        }
+    }
+
+    draw() {
+        ctx.save();
+        ctx.translate(this.x + this.w / 2, this.y + this.h / 2);
+        
+        let angle = 0;
+        if (this.axis === "NS") angle = (this.dir === 1) ? Math.PI : 0;
+        else angle = (this.dir === 1) ? Math.PI / 2 : -Math.PI / 2;
+        ctx.rotate(angle);
+
+        // Main body
+        ctx.fillStyle = this.color;
+        this.roundRect(-this.width / 2, -this.length / 2, this.width, this.length, 3);
+        
+        // Detail drawing
+        ctx.fillStyle = "rgba(30, 30, 30, 0.8)";
+        if (this.type === "car") {
+            ctx.fillRect(-this.width / 2 + 2, -this.length / 2 + 8, this.width - 4, 8);
+            ctx.fillRect(-this.width / 2 + 2, this.length / 2 - 14, this.width - 4, 6);
+        } else if (this.type === "bus") {
+            ctx.fillStyle = "rgb(200, 220, 255)";
+            for (let y = -this.length / 2 + 10; y < this.length / 2 - 10; y += 12) {
+                ctx.fillRect(-this.width / 2 + 2, y, this.width - 4, 8);
+            }
+        } else if (this.type === "truck") {
+            ctx.fillStyle = "rgb(150, 150, 150)";
+            ctx.fillRect(-this.width / 2, -this.length / 2, this.width, 18);
+            ctx.fillStyle = "rgb(30, 30, 30)";
+            ctx.fillRect(-this.width / 2, -this.length / 2 + 18, this.width, 2);
+        } else if (this.type === "bike") {
+            ctx.beginPath();
+            ctx.arc(0, 0, 4, 0, Math.PI * 2);
+            ctx.fill();
+        } else if (this.type === "ambulance") {
+            ctx.fillStyle = "red";
+            ctx.fillRect(-2, -8, 4, 16);
+            ctx.fillRect(-8, -2, 16, 4);
+        }
+
+        ctx.restore();
+
+        if (this.isEmergency && (Date.now() % 300 < 150)) {
+            ctx.fillStyle = "rgba(0, 100, 255, 0.4)";
+            ctx.fillRect(this.x, this.y, this.w, this.h);
+        }
+    }
+
+    roundRect(x, y, w, h, r) {
+        ctx.beginPath();
+        ctx.moveTo(x + r, y);
+        ctx.lineTo(x + w - r, y);
+        ctx.quadraticCurveTo(x + w, y, x + w, y + r);
+        ctx.lineTo(x + w, y + h - r);
+        ctx.quadraticCurveTo(x + w, y + h, x + w - r, y + h);
+        ctx.lineTo(x + r, y + h);
+        ctx.quadraticCurveTo(x, y + h, x, y + h - r);
+        ctx.lineTo(x, y + r);
+        ctx.quadraticCurveTo(x, y, x + r, y);
+        ctx.closePath();
+        ctx.fill();
+    }
+
+    getFrontBumper() {
+        if (this.axis === "NS") return (this.dir === 1) ? this.y + this.h : this.y;
+        else return (this.dir === 1) ? this.x + this.w : this.x;
+    }
+}
+
+/**
+ * ==========================================
+ * 4. TRAFFIC SIGNAL & AI CONTROLLER
+ * ==========================================
+ */
+class TrafficController {
+    constructor() {
+        this.signals = { "NS": "RED", "EW": "GREEN" };
+        this.timer = 10.0;
+        this.transitioning = false;
+        this.targetAxis = null;
+        this.reason = "SYSTEM INITIALIZATION";
+    }
+
+    update(vehicles, dt) {
+        this.timer -= dt;
+        if (this.transitioning) {
+            if (this.timer <= 0) {
+                this.signals = { "NS": "RED", "EW": "RED" };
+                this.signals[this.targetAxis] = "GREEN";
+                this.transitioning = false;
+                this.timer = 8.0;
+            }
+            return;
+        }
+
+        if (this.timer > 0) return;
+
+        const nsData = this.evaluateAxis(vehicles, "NS");
+        const ewData = this.evaluateAxis(vehicles, "EW");
+
+        const active = (this.signals["NS"] === "GREEN") ? "NS" : "EW";
+        const inactive = (active === "NS") ? "EW" : "NS";
+
+        if ((nsData.emg > 0 && inactive === "NS") || (ewData.emg > 0 && inactive === "EW")) {
+            const axisName = (nsData.emg > 0) ? "NORTH-SOUTH" : "EAST-WEST";
+            this.switch((nsData.emg > 0) ? "NS" : "EW", `EMERGENCY PRIORITY - ${axisName}`);
+        } else if (nsData.score > ewData.score + 10 && inactive === "NS") {
+            this.switch("NS", "CONGESTION OVERRIDE: NORTH-SOUTH");
+        } else if (ewData.score > nsData.score + 10 && inactive === "EW") {
+            this.switch("EW", "CONGESTION OVERRIDE: EAST-WEST");
+        } else {
+            this.reason = "MAINTAINING FLOW: STABLE DENSITY";
+            this.timer = 3.0;
+        }
+    }
+
+    evaluateAxis(vehicles, axis) {
+        const waiting = vehicles.filter(v => v.axis === axis && !v.passedIntersection && v.speed < 0.5);
+        const countScore = waiting.length * 2;
+        const waitScore = waiting.reduce((a, b) => a + b.waitTime, 0) * 0.5;
+        const emg = vehicles.filter(v => v.axis === axis && !v.passedIntersection && v.isEmergency).length;
+        return { score: countScore + waitScore, emg: emg };
+    }
+
+    switch(target, reason) {
+        this.signals = { "NS": "YELLOW", "EW": "YELLOW" };
+        this.transitioning = true;
+        this.targetAxis = target;
+        this.timer = 2.0;
+        this.reason = reason;
+    }
+}
+
+/**
+ * ==========================================
+ * 5. ENVIRONMENT RENDERER
+ * ==========================================
+ */
+class Environment {
+    constructor() {
+        this.bgCache = document.createElement('canvas');
+        this.bgCache.width = SIM_W;
+        this.bgCache.height = SIM_H;
+        this.buildStaticEnvironment();
+    }
+
+    buildStaticEnvironment() {
+        const bctx = this.bgCache.getContext('2d');
+        bctx.fillStyle = C_GRASS;
+        bctx.fillRect(0, 0, SIM_W, SIM_H);
+
+        // Roads
+        bctx.fillStyle = C_ROAD;
+        bctx.fillRect(0, CY - ROAD_W / 2, SIM_W, ROAD_W);
+        bctx.fillRect(CX - ROAD_W / 2, 0, ROAD_W, SIM_H);
+
+        // Sidewalks
+        const sw = 15;
+        bctx.fillStyle = C_SIDEWALK;
+        bctx.fillRect(0, CY - ROAD_W / 2 - sw, SIM_W, sw);
+        bctx.fillRect(0, CY + ROAD_W / 2, SIM_W, sw);
+        bctx.fillRect(CX - ROAD_W / 2 - sw, 0, sw, SIM_H);
+        bctx.fillRect(CX + ROAD_W / 2, 0, sw, SIM_H);
+        // Intersection box
+        bctx.fillStyle = C_ROAD;
+        bctx.fillRect(CX - ROAD_W / 2 - sw, CY - ROAD_W / 2, ROAD_W + sw * 2, ROAD_W);
+
+        // Markings
+        this.drawDashedLine(bctx, 0, CY, SIM_W, CY, C_YELLOW_LINE, true);
+        this.drawDashedLine(bctx, CX, 0, CX, SIM_H, C_YELLOW_LINE, true);
+        
+        [ -LANE_W, LANE_W ].forEach(offset => {
+            this.drawDashedLine(bctx, 0, CY + offset, SIM_W, CY + offset, C_MARKING);
+            this.drawDashedLine(bctx, CX + offset, 0, CX + offset, SIM_H, C_MARKING);
+        });
+
+        const zDist = ROAD_W / 2 + 5;
+        this.drawZebra(bctx, CX, CY - zDist, true);
+        this.drawZebra(bctx, CX, CY + zDist, true);
+        this.drawZebra(bctx, CX - zDist, CY, false);
+        this.drawZebra(bctx, CX + zDist, CY, false);
+
+        const rw2 = ROAD_W / 2 + 10;
+        this.drawBuildings(bctx, 0, 0, CX - rw2, CY - rw2);
+        this.drawBuildings(bctx, CX + rw2, 0, SIM_W - (CX + rw2), CY - rw2);
+        this.drawBuildings(bctx, 0, CY + rw2, CX - rw2, SIM_H - (CY + rw2));
+        this.drawBuildings(bctx, CX + rw2, CY + rw2, SIM_W - (CX + rw2), SIM_H - (CY + rw2));
+    }
+
+    drawDashedLine(ctx, x1, y1, x2, y2, color, double) {
+        ctx.strokeStyle = color;
+        ctx.lineWidth = double ? 4 : 2;
+        ctx.setLineDash(double ? [] : [20, 15]);
+        ctx.beginPath();
+        ctx.moveTo(x1, y1);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+    }
+
+    drawZebra(ctx, x, y, horizontal) {
+        const w = horizontal ? ROAD_W : 15;
+        const h = horizontal ? 15 : ROAD_W;
+        ctx.fillStyle = C_MARKING;
+        ctx.fillRect(x - w / 2, y - h / 2, w, h);
+    }
+
+    drawBuildings(ctx, qx, qy, qw, qh) {
+        const pad = 25;
+        const bx = qx + pad, by = qy + pad;
+        const bw = qw - pad * 2, bh = qh - pad * 2;
+        if (bw <= 0 || bh <= 0) return;
+
+        ctx.fillStyle = C_BUILDING_BASE;
+        ctx.fillRect(bx, by, bw, bh);
+
+        const colors = ["#2d3237", "#373c41", "#41464b", "#282d32"];
+        for (let x = bx + 15; x < bx + bw - 50; x += 75) {
+            for (let y = by + 15; y < by + bh - 50; y += 75) {
+                if (Math.random() < 0.85) {
+                    const w = 45 + Math.random() * 20;
+                    const h = 45 + Math.random() * 20;
+                    ctx.fillStyle = colors[Math.floor(Math.random() * colors.length)];
+                    ctx.fillRect(x, y, w, h);
+                    
+                    // Windows
+                    for (let wx = x + 6; wx < x + w - 10; wx += 14) {
+                        for (let wy = y + 6; wy < y + h - 10; wy += 14) {
+                            ctx.fillStyle = Math.random() < 0.6 ? "#d2e6b4" : "#14191e";
+                            ctx.fillRect(wx, wy, 5, 7);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    render() {
+        ctx.drawImage(this.bgCache, 0, 0);
+    }
+
+    renderSignals(signals, timer) {
+        const poles = {
+            "NS": [[CX - ROAD_W / 2 - 20, CY + ROAD_W / 2 + 10], [CX + ROAD_W / 2 + 10, CY - ROAD_W / 2 - 40]],
+            "EW": [[CX - ROAD_W / 2 - 40, CY - ROAD_W / 2 - 20], [CX + ROAD_W / 2 + 10, CY + ROAD_W / 2 + 10]]
+        };
+        ctx.font = "bold 14px Consolas";
+        ctx.textAlign = "left";
+        for (const [axis, state] of Object.entries(signals)) {
+            poles[axis].forEach(([px, py]) => {
+                ctx.fillStyle = "#1e1e1e";
+                ctx.fillRect(px, py, 20, 50);
+
+                const c_red = (state === "RED" || state === "YELLOW") ? "red" : "#320000";
+                const c_yel = (state === "YELLOW") ? "#ffc800" : "#323200";
+                const c_grn = (state === "GREEN") ? "#00ff00" : "#003200";
+
+                this.drawCircle(px + 10, py + 10, 6, c_red);
+                this.drawCircle(px + 10, py + 25, 6, c_yel);
+                this.drawCircle(px + 10, py + 40, 6, c_grn);
+
+                if (state === "GREEN" || state === "YELLOW") {
+                    ctx.fillStyle = "white";
+                    ctx.fillText(Math.max(0, timer).toFixed(1), px - 5, py - 5);
+                }
+            });
+        }
+    }
+
+    drawCircle(x, y, r, color) {
+        ctx.beginPath();
+        ctx.arc(x, y, r, 0, Math.PI * 2);
+        ctx.fillStyle = color;
+        ctx.fill();
+    }
+}
+
+/**
+ * ==========================================
+ * 6. MAIN SIMULATION ENGINE
+ * ==========================================
+ */
+class SimulationApp {
+    constructor() {
+        this.env = new Environment();
+        this.ai = new TrafficController();
+        this.intro = new IntroScreen();
+        this.vehicles = [];
+        this.state = "INTRO";
+        this.status = "RUNNING";
+        this.speedMult = 1.0;
+        this.lastTime = Date.now();
+
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toLowerCase();
+            if (key === 'p' && this.state === "SIM") this.status = (this.status === "RUNNING") ? "PAUSED" : "RUNNING";
+            if (key === 'r') this.reset();
+            if (key === 'arrowup') this.speedMult = Math.min(5.0, this.speedMult + 0.5);
+            if (key === 'arrowdown') this.speedMult = Math.max(0.5, this.speedMult - 0.5);
+        });
+    }
+
+    reset() {
+        this.vehicles = [];
+        this.ai = new TrafficController();
+        this.state = "SIM";
+        this.status = "RUNNING";
+        this.speedMult = 1.0;
+    }
+
+    processVehicles(dt) {
+        const stopLines = {
+            "NS": { "1": CY - ROAD_W / 2 - 10, "-1": CY + ROAD_W / 2 + 10 },
+            "EW": { "1": CX - ROAD_W / 2 - 10, "-1": CX + ROAD_W / 2 + 10 }
+        };
+
+        this.vehicles.forEach(v => {
+            let targetSpd = v.maxSpeed * this.speedMult;
+            const front = v.getFrontBumper();
+
+            // 1. Traffic Light Logic
+            if (!v.passedIntersection) {
+                const sl = stopLines[v.axis][v.dir.toString()];
+                const distToLight = (sl - front) * v.dir;
+                if (distToLight < 0) {
+                    v.passedIntersection = true;
+                } else if (distToLight < 80 && this.ai.signals[v.axis] !== "GREEN") {
+                    if (distToLight < 15) targetSpd = 0;
+                    else targetSpd = Math.min(targetSpd, Math.max(0, distToLight * 0.05));
+                }
+            }
+
+            // 2. Collision / Car Following
+            const lookDist = (v.type === "bike") ? 45 : 35;
+            let obstacleFound = false;
+
+            for (const o of this.vehicles) {
+                if (o === v) continue;
+                
+                let inFront = false;
+                if (v.axis === "NS" && Math.abs(v.x - o.x) < 10) {
+                    if ((v.dir === 1 && o.y > v.y) || (v.dir === -1 && o.y < v.y)) inFront = true;
+                } else if (v.axis === "EW" && Math.abs(v.y - o.y) < 10) {
+                    if ((v.dir === 1 && o.x > v.x) || (v.dir === -1 && o.x < v.x)) inFront = true;
+                }
+
+                if (inFront) {
+                    let gap = 0;
+                    if (v.axis === "NS") gap = Math.abs(o.y - v.y) - (v.h/2 + o.h/2);
+                    else gap = Math.abs(o.x - v.x) - (v.w/2 + o.w/2);
+
+                    if (gap < lookDist + 10) {
+                        obstacleFound = true;
+                        if (gap < 10) {
+                            targetSpd = 0;
+                            v.speed = Math.min(v.speed, 0.5);
+                        } else {
+                            targetSpd = Math.min(targetSpd, o.speed * 0.95);
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 3. Kinematics
+            if (v.speed > targetSpd) v.speed = Math.max(targetSpd, v.speed - v.brake * this.speedMult);
+            else if (v.speed < targetSpd) v.speed = Math.min(targetSpd, v.speed + v.accel * this.speedMult);
+            
+            if (v.speed < 0.05) v.speed = 0;
+            if (v.speed === 0 && !v.passedIntersection) v.waitTime += dt;
+
+            if (v.axis === "NS") v.y += v.speed * v.dir * (dt * 60);
+            else v.x += v.speed * v.dir * (dt * 60);
+        });
+    }
+
+    spawnTraffic() {
+        if (Math.random() < 0.04 * this.speedMult && this.vehicles.length < 100) {
+            const axis = Math.random() < 0.5 ? "NS" : "EW";
+            const dir = Math.random() < 0.5 ? 1 : -1;
+            const lane = Math.random() < 0.5 ? 0 : 1;
+            
+            const types = ["car", "bus", "truck", "bike", "ambulance"];
+            const weights = [0.5, 0.1, 0.15, 0.2, 0.05];
+            let r = Math.random(), sum = 0, vType = "car";
+            for(let i=0; i<types.length; i++) {
+                sum += weights[i];
+                if(r <= sum) { vType = types[i]; break; }
+            }
+
+            const vDummy = new Vehicle(axis, dir, lane, vType);
+            let safe = true;
+            for (const v of this.vehicles) {
+                const dist = Math.sqrt(Math.pow(v.x - vDummy.x, 2) + Math.pow(v.y - vDummy.y, 2));
+                if (dist < 100) { safe = false; break; }
+            }
+            if (safe) this.vehicles.push(vDummy);
+        }
+    }
+
+    checkFailConditions() {
+        const waiting = this.vehicles.filter(v => v.speed < 0.5 && !v.passedIntersection);
+        if (waiting.length > 55) return true;
+        const maxWait = Math.max(...waiting.map(v => v.waitTime), 0);
+        return maxWait > 30.0;
+    }
+
+    drawUI() {
+        ctx.fillStyle = C_UI_BG;
+        ctx.fillRect(SIM_W, 0, UI_W, HEIGHT);
+        ctx.strokeStyle = C_ACCENT;
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(SIM_W, 0);
+        ctx.lineTo(SIM_W, HEIGHT);
+        ctx.stroke();
+
+        let x = SIM_W + 20, y = 40;
+        ctx.textAlign = "left";
+        ctx.fillStyle = C_ACCENT;
+        ctx.font = "bold 18px Consolas";
+        ctx.fillText("AI DIAGNOSTIC PANEL", x, y);
+        
+        ctx.font = "14px Consolas";
+        ctx.fillStyle = "white";
+        y += 40;
+        ctx.fillText(`SYSTEM STATUS: ${this.status}`, x, y);
+        ctx.fillText(`SIM SPEED: ${this.speedMult.toFixed(1)}x`, x, y + 20);
+        ctx.fillText(`ACTIVE VEHICLES: ${this.vehicles.length}`, x, y + 40);
+
+        y += 100;
+        ctx.fillStyle = C_ACCENT;
+        ctx.font = "bold 18px Consolas";
+        ctx.fillText("ALGORITHMIC PARAMETERS", x, y);
+        ctx.font = "14px Consolas";
+        ctx.fillStyle = "#96c8ff";
+        ctx.fillText("AI Logic: Rule-Based Intelligent Agent", x, y + 30);
+        ctx.fillText("Algorithm: Weighted Priority Selection", x, y + 50);
+
+        y += 110;
+        ctx.fillStyle = C_ACCENT;
+        ctx.font = "bold 18px Consolas";
+        ctx.fillText("TRAFFIC DENSITY (REAL-TIME)", x, y);
+        const n_c = this.vehicles.filter(v => v.axis === "NS" && !v.passedIntersection && v.speed < 0.5).length;
+        const e_c = this.vehicles.filter(v => v.axis === "EW" && !v.passedIntersection && v.speed < 0.5).length;
+        ctx.font = "14px Consolas";
+        ctx.fillStyle = "#c8c8c8";
+        ctx.fillText(`NORTH-SOUTH QUEUE: ${n_c} units`, x, y + 30);
+        ctx.fillText(`EAST-WEST QUEUE  : ${e_c} units`, x, y + 50);
+
+        y += 100;
+        ctx.fillStyle = C_ACCENT;
+        ctx.font = "bold 18px Consolas";
+        ctx.fillText("AI REASONING OUTPUT", x, y);
+        ctx.fillStyle = "#0f1419";
+        ctx.fillRect(x, y + 20, UI_W - 40, 80);
+        
+        ctx.fillStyle = this.ai.reason.includes("EMERGENCY") ? "#ff5050" : C_ACCENT;
+        const words = this.ai.reason.split(' ');
+        let line = "", ly = y + 40;
+        words.forEach(w => {
+            if ((line + w).length < 30) line += w + " ";
+            else { ctx.fillText(line, x + 10, ly); line = w + " "; ly += 20; }
+        });
+        ctx.fillText(line, x + 10, ly);
+
+        y = HEIGHT - 100;
+        ctx.fillStyle = C_ACCENT;
+        ctx.font = "bold 18px Consolas";
+        ctx.fillText("CONTROLS", x, y);
+        ctx.font = "14px Consolas";
+        ctx.fillStyle = "#969696";
+        ctx.fillText("[P] Play / Pause  [R] Restart", x, y + 30);
+        ctx.fillText("[Up/Down] Adjust Simulation Speed", x, y + 50);
+    }
+
+    drawGameOver() {
+        ctx.fillStyle = "rgba(40, 0, 0, 0.85)";
+        ctx.fillRect(0, 0, WIDTH, HEIGHT);
+        ctx.textAlign = "center";
+        ctx.fillStyle = "#ff3232";
+        ctx.font = "bold 45px Courier New";
+        ctx.fillText("GAME OVER – TRAFFIC SYSTEM FAILED", WIDTH / 2, HEIGHT / 2 - 40);
+        ctx.font = "18px Consolas";
+        ctx.fillStyle = "#ffc8c8";
+        ctx.fillText("CRITICAL TRAFFIC OVERLOAD / DEADLOCK DETECTED", WIDTH / 2, HEIGHT / 2 + 10);
+        
+        ctx.fillStyle = C_ACCENT;
+        ctx.fillRect(WIDTH / 2 - 160, HEIGHT / 2 + 50, 320, 60);
+        ctx.fillStyle = "#14191e";
+        ctx.fillRect(WIDTH / 2 - 157, HEIGHT / 2 + 53, 314, 54);
+        ctx.fillStyle = C_ACCENT;
+        ctx.fillText("[R] RESTART SIMULATION", WIDTH / 2, HEIGHT / 2 + 88);
+    }
+
+    run() {
+        const now = Date.now();
+        const dt = (now - this.lastTime) / 1000;
+        this.lastTime = now;
+
+        if (this.state === "INTRO") {
+            if (this.intro.updateAndDraw(dt)) this.state = "SIM";
+        } else {
+            this.env.render();
+            this.env.renderSignals(this.ai.signals, this.ai.timer);
+            
+            if (this.state === "SIM" && this.status === "RUNNING") {
+                this.spawnTraffic();
+                this.ai.update(this.vehicles, dt * this.speedMult);
+                this.processVehicles(dt);
+                if (this.checkFailConditions()) {
+                    this.state = "GAMEOVER";
+                    this.status = "FAIL";
+                }
+            }
+
+            this.vehicles.forEach(v => v.draw());
+            this.vehicles = this.vehicles.filter(v => v.x > -200 && v.x < SIM_W + 200 && v.y > -200 && v.y < SIM_H + 200);
+            
+            this.drawUI();
+            if (this.state === "GAMEOVER") this.drawGameOver();
+        }
+
+        requestAnimationFrame(() => this.run());
+    }
+}
+
+// Start Application
+new SimulationApp().run();
+</script>
+</body>
+</html>
